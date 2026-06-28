@@ -1,5 +1,90 @@
 import { describe, expect, test } from "bun:test";
-import { __testing } from "./review-gate.ts";
+import qualityLoopPlugin, { __testing } from "./review-gate.ts";
+
+const activeLoop = (overrides = {}) => ({
+  codexFingerprints: [],
+  codexReadyForGrader: false,
+  completedStages: [],
+  cycles: 0,
+  graderFingerprints: [],
+  repoKey: "repo-a",
+  reviewReadyForCodex: false,
+  ...overrides,
+});
+
+const createPluginHarness = () => {
+  const tools = {};
+  const configuration = { value: { qualityLoopPlugin: { passes: {}, version: 1 } } };
+  const amp = {
+    $: fakeRepoShell,
+    configuration: {
+      async get() {
+        return configuration.value;
+      },
+      async update(update) {
+        configuration.value = { ...configuration.value, ...update };
+      },
+    },
+    helpers: {
+      shellCommandFromToolCall() {
+        return undefined;
+      },
+    },
+    logger: { log() {} },
+    on() {},
+    registerCommand() {},
+    registerTool(tool) {
+      if (!tool?.name || typeof tool.execute !== "function") {
+        throw new Error("invalid tool registration");
+      }
+      tools[tool.name] = tool;
+    },
+  };
+
+  qualityLoopPlugin(amp);
+
+  return {
+    configuration,
+    ctx: { thread: { id: "T-test-thread" } },
+    tools,
+  };
+};
+
+const executeTool = (tools, ctx, name, input = {}) => {
+  const tool = tools[name];
+  if (!tool || typeof tool.execute !== "function") {
+    throw new Error(`missing registered tool: ${name}`);
+  }
+  return tool.execute({ workdir: "/repo/a", ...input }, ctx);
+};
+
+const shellResult = (stdout) => ({ exitCode: 0, stderr: "", stdout });
+
+async function fakeRepoShell(strings, ...values) {
+  const command = strings.reduce((text, part, index) => `${text}${part}${values[index] ?? ""}`, "");
+  if (command.includes(" rev-parse --show-toplevel")) {
+    return shellResult("/repo/a\n");
+  }
+  if (command.includes(" status --porcelain=v1 --untracked-files=all")) {
+    return shellResult("M  file.ts\n");
+  }
+  if (command.includes(" diff --binary --cached --")) {
+    return shellResult("diff --git a/file.ts b/file.ts\n");
+  }
+  if (command.includes(" diff --binary --")) {
+    return shellResult("");
+  }
+  if (command.includes(" diff --stat --cached --")) {
+    return shellResult(" file.ts | 1 +\n");
+  }
+  if (command.includes(" diff --stat --")) {
+    return shellResult("");
+  }
+  if (command.includes(" ls-files --others --exclude-standard -z")) {
+    return shellResult("");
+  }
+  throw new Error(`unexpected shell command: ${command}`);
+}
 
 describe("commit gate parsing", () => {
   test("ignores read-only commit probes but catches later mutating commits", () => {
@@ -304,6 +389,92 @@ describe("status item best-effort handling", () => {
     expect(logs.map(([message]) => message)).toContain("review gate status item update failed");
     expect(logs.map(([message]) => message)).toContain("review gate status item clear failed");
   });
+
+  test("renders active status for the same repo after the fingerprint changes", () => {
+    const status = __testing.renderStatus(snapshot, undefined, {
+      fingerprint: "old-fingerprint",
+      kind: "active",
+      repoRoot: "/repo/a",
+      since: 0,
+    });
+
+    expect(status).toContain("Review gate: active for current diff.");
+    expect(status).toContain("Fingerprint: fingerprint-a");
+  });
+});
+
+describe("quality loop tool behavior", () => {
+  test("enforces review, Codex, grader, final audit, then pass through registered tools", async () => {
+    const { configuration, ctx, tools } = createPluginHarness();
+
+    expect(
+      await executeTool(tools, ctx, "quality_loop_start", {
+        blocked_command: "git commit -m test",
+      }),
+    ).toContain("First required action: call quality_loop_review");
+    expect(await executeTool(tools, ctx, "quality_loop_codex_review")).toContain(
+      "call quality_loop_review first",
+    );
+    expect(await executeTool(tools, ctx, "quality_loop_review")).toContain(
+      "remaining stage tools before quality_loop_passed: quality_loop_codex_review, quality_loop_grader, quality_loop_final_audit",
+    );
+    expect(await executeTool(tools, ctx, "quality_loop_final_audit")).toContain(
+      "call quality_loop_codex_review, quality_loop_grader first",
+    );
+    expect(await executeTool(tools, ctx, "quality_loop_codex_review")).toContain(
+      "Then call quality_loop_grader for this cycle.",
+    );
+    expect(
+      await executeTool(tools, ctx, "quality_loop_passed", {
+        grader_verdict: "pending",
+        summary: "pending",
+      }),
+    ).toContain("call quality_loop_grader");
+    expect(await executeTool(tools, ctx, "quality_loop_grader")).toContain(
+      "remaining stage tools before quality_loop_passed: quality_loop_final_audit",
+    );
+    expect(
+      await executeTool(tools, ctx, "quality_loop_passed", {
+        grader_verdict: "pending",
+        summary: "pending",
+      }),
+    ).toContain("call quality_loop_final_audit");
+    expect(await executeTool(tools, ctx, "quality_loop_final_audit")).toContain(
+      "all explicit stage tools recorded",
+    );
+    expect(
+      await executeTool(tools, ctx, "quality_loop_passed", {
+        grader_verdict: "separate grader passed",
+        summary: "all required stages complete",
+      }),
+    ).toContain("quality_loop_passed recorded");
+
+    expect(Object.values(configuration.value.qualityLoopPlugin.passes)).toHaveLength(1);
+  });
+
+  test("counts same-fingerprint review and Codex cycles toward the cap", async () => {
+    const { ctx, tools } = createPluginHarness();
+
+    await executeTool(tools, ctx, "quality_loop_start", {
+      blocked_command: "git commit -m test",
+    });
+
+    for (let cycle = 0; cycle < 3; cycle += 1) {
+      expect(await executeTool(tools, ctx, "quality_loop_review")).toContain(
+        "quality_loop_review recorded",
+      );
+      expect(await executeTool(tools, ctx, "quality_loop_codex_review")).toContain(
+        "quality_loop_codex_review recorded",
+      );
+      expect(await executeTool(tools, ctx, "quality_loop_grader")).toContain(
+        "quality_loop_grader recorded",
+      );
+    }
+
+    expect(await executeTool(tools, ctx, "quality_loop_review")).toContain(
+      "maximum 3 review+Codex cycles already reached",
+    );
+  });
 });
 
 describe("pass recording invariants", () => {
@@ -317,49 +488,270 @@ describe("pass recording invariants", () => {
     status: " M file.ts\n",
   };
 
-  test("requires an active same-repo same-fingerprint loop", () => {
+  test("keeps an active same-repo loop when review fixes change the fingerprint", () => {
     expect(__testing.activeLoopMatches(undefined, snapshot)).toBe(false);
+    expect(__testing.activeLoopMatches(activeLoop(), snapshot)).toBe(true);
     expect(
-      __testing.activeLoopMatches(
-        { completedStages: [], cycles: 0, fingerprint: "fingerprint-a", repoKey: "repo-a" },
+      __testing.activeLoopMatches(activeLoop({ finalAuditFingerprint: "fingerprint-b" }), snapshot),
+    ).toBe(true);
+    expect(__testing.activeLoopMatches(activeLoop({ repoKey: "repo-b" }), snapshot)).toBe(false);
+  });
+
+  test("tracks grader coverage by current fingerprint", () => {
+    expect(
+      __testing.graderCoversCurrentDiff(
+        activeLoop({
+          codexFingerprints: ["fingerprint-a"],
+          completedStages: ["review", "codex", "grade"],
+          cycles: 1,
+          graderFingerprints: ["fingerprint-a"],
+        }),
         snapshot,
       ),
     ).toBe(true);
     expect(
-      __testing.activeLoopMatches(
-        { completedStages: [], cycles: 0, fingerprint: "fingerprint-b", repoKey: "repo-a" },
+      __testing.graderCoversCurrentDiff(
+        activeLoop({
+          codexFingerprints: ["fingerprint-a"],
+          completedStages: ["review", "codex", "grade"],
+          cycles: 1,
+          graderFingerprints: ["fingerprint-b"],
+        }),
+        snapshot,
+      ),
+    ).toBe(false);
+  });
+
+  test("requires a review checkpoint before later Codex cycles", () => {
+    expect(
+      __testing.missingCurrentCyclePrerequisiteStages(
+        activeLoop({
+          completedStages: ["review"],
+          reviewReadyForCodex: true,
+        }),
+        "codex",
+        snapshot,
+      ),
+    ).toEqual([]);
+    expect(
+      __testing.missingCurrentCyclePrerequisiteStages(
+        activeLoop({
+          codexFingerprints: ["fingerprint-a"],
+          completedStages: ["review", "codex"],
+          cycles: 1,
+          graderFingerprints: ["fingerprint-a"],
+        }),
+        "codex",
+        snapshot,
+      ),
+    ).toEqual(["review"]);
+    expect(
+      __testing.missingCurrentCyclePrerequisiteStages(
+        activeLoop({
+          codexFingerprints: ["fingerprint-b"],
+          completedStages: ["review", "codex"],
+          cycles: 1,
+          graderFingerprints: ["fingerprint-b"],
+          reviewReadyForCodex: true,
+        }),
+        "codex",
+        snapshot,
+      ),
+    ).toEqual([]);
+  });
+
+  test("allows grader after Codex fixes change the fingerprint", () => {
+    expect(
+      __testing.missingCurrentCyclePrerequisiteStages(
+        activeLoop({
+          codexFingerprints: ["fingerprint-b"],
+          codexReadyForGrader: true,
+          completedStages: ["review", "codex"],
+          cycles: 1,
+        }),
+        "grade",
+        snapshot,
+      ),
+    ).toEqual([]);
+    expect(
+      __testing.missingCurrentCyclePrerequisiteStages(
+        activeLoop({
+          codexFingerprints: ["fingerprint-b"],
+          completedStages: ["review", "codex"],
+          cycles: 1,
+        }),
+        "grade",
+        snapshot,
+      ),
+    ).toEqual(["codex"]);
+  });
+
+  test("clears review readiness after every Codex checkpoint", () => {
+    const loop = activeLoop({
+      codexFingerprints: ["fingerprint-a"],
+      codexReadyForGrader: false,
+      completedStages: ["review", "codex"],
+      cycles: 1,
+      reviewReadyForCodex: true,
+    });
+
+    __testing.recordQualityLoopStageTransition(loop, "codex", snapshot);
+
+    expect(loop.reviewReadyForCodex).toBe(false);
+    expect(loop.codexReadyForGrader).toBe(true);
+    expect(loop.cycles).toBe(2);
+  });
+
+  test("requires grader before any next cycle checkpoint", () => {
+    const pendingGrader = activeLoop({
+      codexFingerprints: ["fingerprint-b"],
+      codexReadyForGrader: true,
+      completedStages: ["review", "codex"],
+      cycles: 1,
+    });
+
+    expect(
+      __testing.missingCurrentCyclePrerequisiteStages(pendingGrader, "review", snapshot),
+    ).toEqual(["grade"]);
+    expect(
+      __testing.missingCurrentCyclePrerequisiteStages(pendingGrader, "codex", snapshot),
+    ).toEqual(["grade"]);
+    expect(
+      __testing.missingCurrentCyclePrerequisiteStages(pendingGrader, "final_audit", snapshot),
+    ).toEqual(["grade"]);
+    expect(
+      __testing.missingCurrentCyclePrerequisiteStages(pendingGrader, "grade", snapshot),
+    ).toEqual([]);
+  });
+
+  test("records every grader checkpoint even for a previously graded fingerprint", () => {
+    const loop = activeLoop({
+      codexFingerprints: ["fingerprint-a", "fingerprint-b"],
+      codexReadyForGrader: true,
+      completedStages: ["review", "codex", "grade"],
+      cycles: 2,
+      graderFingerprints: ["fingerprint-a"],
+    });
+
+    __testing.recordQualityLoopStageTransition(loop, "grade", snapshot);
+
+    expect(loop.codexReadyForGrader).toBe(false);
+    expect(loop.graderFingerprints).toEqual(["fingerprint-a", "fingerprint-a"]);
+  });
+
+  test("blocks loop restart while the latest Codex cycle is pending grader", () => {
+    expect(
+      __testing.pendingGraderBlocksRestart(
+        activeLoop({
+          codexFingerprints: ["fingerprint-b"],
+          codexReadyForGrader: true,
+          completedStages: ["review", "codex"],
+          cycles: 1,
+        }),
+        snapshot,
+      ),
+    ).toBe(true);
+    expect(
+      __testing.pendingGraderBlocksRestart(
+        activeLoop({
+          codexFingerprints: ["fingerprint-b"],
+          codexReadyForGrader: true,
+          completedStages: ["review", "codex"],
+          cycles: 1,
+          repoKey: "repo-b",
+        }),
         snapshot,
       ),
     ).toBe(false);
     expect(
-      __testing.activeLoopMatches(
-        { completedStages: [], cycles: 0, fingerprint: "fingerprint-a", repoKey: "repo-b" },
+      __testing.pendingGraderBlocksRestart(
+        activeLoop({
+          codexFingerprints: ["fingerprint-b"],
+          completedStages: ["review", "codex", "grade"],
+          cycles: 1,
+          graderFingerprints: ["fingerprint-a"],
+        }),
         snapshot,
       ),
     ).toBe(false);
+  });
+
+  test("requires current grader before final audit", () => {
+    expect(
+      __testing.missingCurrentCyclePrerequisiteStages(
+        activeLoop({
+          codexFingerprints: ["fingerprint-a"],
+          completedStages: ["review", "codex", "grade"],
+          cycles: 1,
+          graderFingerprints: ["fingerprint-a"],
+        }),
+        "final_audit",
+        snapshot,
+      ),
+    ).toEqual([]);
+    expect(
+      __testing.missingCurrentCyclePrerequisiteStages(
+        activeLoop({
+          codexFingerprints: ["fingerprint-b"],
+          completedStages: ["review", "codex", "grade"],
+          cycles: 1,
+          graderFingerprints: ["fingerprint-a"],
+        }),
+        "final_audit",
+        snapshot,
+      ),
+    ).toEqual([]);
+    expect(
+      __testing.missingCurrentCyclePrerequisiteStages(
+        activeLoop({
+          codexFingerprints: ["fingerprint-b"],
+          completedStages: ["review", "codex", "grade"],
+          cycles: 1,
+          graderFingerprints: ["fingerprint-b"],
+        }),
+        "final_audit",
+        snapshot,
+      ),
+    ).toEqual(["grade"]);
+    expect(
+      __testing.missingCurrentCyclePrerequisiteStages(
+        activeLoop({
+          codexFingerprints: ["fingerprint-a"],
+          completedStages: ["review", "codex", "grade"],
+          cycles: 1,
+          graderFingerprints: ["fingerprint-b"],
+        }),
+        "final_audit",
+        snapshot,
+      ),
+    ).toEqual(["grade"]);
   });
 
   test("carries cycle count across same-repo diff restarts only", () => {
     expect(
       __testing.carriedCycleCount(
-        { completedStages: ["review", "codex"], cycles: 3, fingerprint: "old", repoKey: "repo-a" },
+        activeLoop({
+          codexFingerprints: ["old"],
+          completedStages: ["review", "codex"],
+          cycles: 3,
+          graderFingerprints: ["old"],
+        }),
         snapshot,
       ),
     ).toBe(3);
     expect(
       __testing.carriedCycleCount(
-        { completedStages: ["review", "codex"], cycles: 3, fingerprint: "old", repoKey: "repo-b" },
+        activeLoop({
+          codexFingerprints: ["old"],
+          completedStages: ["review", "codex"],
+          cycles: 3,
+          graderFingerprints: ["old"],
+          repoKey: "repo-b",
+        }),
         snapshot,
       ),
     ).toBe(0);
     expect(__testing.carriedCycleCount(undefined, snapshot)).toBe(0);
-  });
-
-  test("counts only review and Codex as capped loop stages", () => {
-    expect(__testing.isReviewCycleStage("review")).toBe(true);
-    expect(__testing.isReviewCycleStage("codex")).toBe(true);
-    expect(__testing.isReviewCycleStage("grade")).toBe(false);
-    expect(__testing.isReviewCycleStage("final_audit")).toBe(false);
   });
 
   test("requires explicit stage tools before pass", () => {
@@ -370,20 +762,115 @@ describe("pass recording invariants", () => {
       "final_audit",
     ]);
     expect(
-      __testing.missingRequiredStages({
-        completedStages: ["review", "codex"],
-        cycles: 1,
-        fingerprint: "fingerprint-a",
-        repoKey: "repo-a",
-      }),
+      __testing.missingRequiredStages(
+        activeLoop({
+          codexFingerprints: ["fingerprint-a"],
+          completedStages: ["review", "codex"],
+          cycles: 1,
+        }),
+      ),
     ).toEqual(["grade", "final_audit"]);
     expect(
-      __testing.missingRequiredStages({
-        completedStages: ["review", "codex", "grade", "final_audit"],
-        cycles: 1,
-        fingerprint: "fingerprint-a",
-        repoKey: "repo-a",
-      }),
+      __testing.missingRequiredStages(
+        activeLoop({
+          codexFingerprints: ["fingerprint-a"],
+          completedStages: ["review", "codex", "grade", "final_audit"],
+          cycles: 1,
+          finalAuditFingerprint: "fingerprint-a",
+          graderFingerprints: ["fingerprint-a"],
+        }),
+      ),
     ).toEqual([]);
+  });
+
+  test("requires final audit to cover the current fingerprint before pass", () => {
+    expect(
+      __testing.finalAuditCoversCurrentDiff(
+        activeLoop({
+          codexFingerprints: ["fingerprint-a"],
+          completedStages: ["review", "codex", "grade", "final_audit"],
+          cycles: 1,
+          finalAuditFingerprint: "fingerprint-a",
+          graderFingerprints: ["fingerprint-a"],
+        }),
+        snapshot,
+      ),
+    ).toBe(true);
+    expect(
+      __testing.finalAuditCoversCurrentDiff(
+        activeLoop({
+          codexFingerprints: ["fingerprint-a"],
+          completedStages: ["review", "codex", "grade", "final_audit"],
+          cycles: 1,
+          finalAuditFingerprint: "fingerprint-b",
+          graderFingerprints: ["fingerprint-a"],
+        }),
+        snapshot,
+      ),
+    ).toBe(false);
+  });
+
+  test("requires grader and final audit coverage for the current fingerprint before pass", () => {
+    expect(
+      __testing.missingCurrentDiffCoverageStages(
+        activeLoop({
+          codexFingerprints: ["fingerprint-a"],
+          completedStages: ["review", "codex", "grade", "final_audit"],
+          cycles: 1,
+          finalAuditFingerprint: "fingerprint-a",
+          graderFingerprints: ["fingerprint-a"],
+        }),
+        snapshot,
+      ),
+    ).toEqual([]);
+    expect(
+      __testing.missingCurrentDiffCoverageStages(
+        activeLoop({
+          codexFingerprints: ["fingerprint-b"],
+          completedStages: ["review", "codex", "grade", "final_audit"],
+          cycles: 1,
+          finalAuditFingerprint: "fingerprint-a",
+          graderFingerprints: ["fingerprint-a"],
+        }),
+        snapshot,
+      ),
+    ).toEqual([]);
+    expect(
+      __testing.missingCurrentDiffCoverageStages(
+        activeLoop({
+          codexFingerprints: ["fingerprint-a"],
+          completedStages: ["review", "codex", "grade", "final_audit"],
+          cycles: 1,
+          finalAuditFingerprint: "fingerprint-a",
+          graderFingerprints: ["fingerprint-b"],
+        }),
+        snapshot,
+      ),
+    ).toEqual(["grade"]);
+    expect(
+      __testing.missingCurrentDiffCoverageStages(
+        activeLoop({
+          codexFingerprints: ["fingerprint-a"],
+          codexReadyForGrader: true,
+          completedStages: ["review", "codex", "grade", "final_audit"],
+          cycles: 1,
+          finalAuditFingerprint: "fingerprint-a",
+          graderFingerprints: ["fingerprint-a"],
+        }),
+        snapshot,
+      ),
+    ).toEqual(["grade"]);
+    expect(
+      __testing.missingCurrentDiffCoverageStages(
+        activeLoop({
+          codexFingerprints: ["fingerprint-a"],
+          completedStages: ["review", "codex", "grade", "final_audit"],
+          cycles: 1,
+          finalAuditFingerprint: "fingerprint-b",
+          graderFingerprints: ["fingerprint-a"],
+        }),
+        snapshot,
+      ),
+    ).toEqual(["final_audit"]);
   });
 });

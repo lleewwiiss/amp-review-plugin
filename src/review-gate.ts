@@ -56,10 +56,14 @@ interface PendingQualityLoopContinuation {
 }
 
 interface ActiveQualityLoop {
+  codexFingerprints: Array<string>;
+  codexReadyForGrader: boolean;
   completedStages: Array<QualityLoopStage>;
   cycles: number;
-  fingerprint: string;
+  finalAuditFingerprint?: string;
+  graderFingerprints: Array<string>;
   repoKey: string;
+  reviewReadyForCodex: boolean;
 }
 
 type QualityLoopStage = "codex" | "final_audit" | "grade" | "review";
@@ -245,7 +249,7 @@ export default function qualityLoopPlugin(amp: PluginAPI) {
 
   amp.registerTool({
     description:
-      "Record that the strict pre-commit review gate passed for the current uncommitted diff. Call only after quality_loop_review, quality_loop_codex_review, quality_loop_grader, and quality_loop_final_audit were called for the active current diff, review-and-simplify ran from the main thread with its required read-only review subagents/tracks, Codex CLI review findings were adjudicated and fixed when aligned with implementation intent, a separate read-only grading subagent verified fixes against feedback, and final improve-codebase/test audits ran.",
+      "Record that the strict pre-commit review gate passed for the current uncommitted diff. Call only after all stage tools were called for the active same-repo loop, each Codex cycle had a separate grader, grader and final-audit checkpoints cover the current diff fingerprint, review-and-simplify ran from the main thread with required read-only tracks, Codex findings were adjudicated and fixed when aligned with intent, and final improve-codebase/test audits ran.",
     async execute(input, ctx) {
       return recordQualityLoopPass(amp, status, activeLoops, input, ctx);
     },
@@ -377,6 +381,12 @@ function createQualityLoopStatus(amp: PluginAPI): QualityLoopStatusController {
       const pass = await getPassForRepo(amp, snapshot.repoKey);
       if (pass?.fingerprint === snapshot.fingerprint) {
         current = passedState(pass);
+        refresh();
+        return;
+      }
+
+      if (current.kind === "active" && current.repoRoot === snapshot.repoRoot) {
+        current = { ...current, fingerprint: snapshot.fingerprint };
         refresh();
         return;
       }
@@ -561,6 +571,15 @@ async function startQualityLoop(
 
   pendingContinuations.delete(ctx.thread.id);
   const previousLoop = activeLoops.get(ctx.thread.id);
+  if (pendingGraderBlocksRestart(previousLoop, snapshot)) {
+    statusController.active(snapshot);
+    return [
+      "quality_loop_start failed: the latest Codex cycle still needs quality_loop_grader before restarting the loop.",
+      `repo: ${snapshot.repoRoot}`,
+      `fingerprint: ${snapshot.fingerprint}`,
+      "Next: call quality_loop_grader for the active loop, then launch the separate read-only grading subagent.",
+    ].join("\n");
+  }
   const cycles = carriedCycleCount(previousLoop, snapshot);
   if (cycles >= MAX_CYCLES) {
     statusController.required(snapshot);
@@ -568,10 +587,13 @@ async function startQualityLoop(
   }
 
   activeLoops.set(ctx.thread.id, {
+    codexFingerprints: [],
+    codexReadyForGrader: false,
     completedStages: [],
     cycles,
-    fingerprint: snapshot.fingerprint,
+    graderFingerprints: [],
     repoKey: snapshot.repoKey,
+    reviewReadyForCodex: false,
   });
   statusController.active(snapshot);
 
@@ -616,27 +638,26 @@ async function recordQualityLoopStage(
     return `${toolName} failed: call quality_loop_start in this thread for the current diff first.`;
   }
 
-  const missingPrerequisites = missingPrerequisiteStages(activeLoop, stage);
+  const missingPrerequisites = uniqueStages([
+    ...missingPrerequisiteStages(activeLoop, stage),
+    ...missingCurrentCyclePrerequisiteStages(activeLoop, stage, snapshot),
+  ]);
   if (missingPrerequisites.length > 0) {
     return `${toolName} failed: call ${missingPrerequisites
       .map((missingStage) => QUALITY_LOOP_STAGE_TOOLS[missingStage])
       .join(", ")} first for the current diff.`;
   }
 
-  const stageAlreadyCompleted = activeLoop.completedStages.includes(stage);
-  if (isReviewCycleStage(stage) && !stageAlreadyCompleted && activeLoop.cycles >= MAX_CYCLES) {
+  if (startsReviewCycle(activeLoop, stage) && activeLoop.cycles >= MAX_CYCLES) {
     return `${toolName} failed: maximum ${MAX_CYCLES} review+Codex cycles already reached for this blocked commit flow. Stop and report the current state instead of starting another review/Codex loop.`;
   }
 
-  if (!stageAlreadyCompleted) {
-    if (stage === "codex") {
-      activeLoop.cycles += 1;
-    }
-    activeLoop.completedStages.push(stage);
-  }
+  recordQualityLoopStageTransition(activeLoop, stage, snapshot);
   statusController.active(snapshot);
 
   const remainingStages = missingRequiredStages(activeLoop);
+  const missingCurrentDiffCoverage =
+    remainingStages.length === 0 ? missingCurrentDiffCoverageStages(activeLoop, snapshot) : [];
   return [
     `${toolName} recorded for current diff.`,
     `repo: ${snapshot.repoRoot}`,
@@ -646,7 +667,11 @@ async function recordQualityLoopStage(
       ? `remaining stage tools before quality_loop_passed: ${remainingStages
           .map((remainingStage) => QUALITY_LOOP_STAGE_TOOLS[remainingStage])
           .join(", ")}`
-      : "all explicit stage tools recorded; after final audit evidence is ready, call quality_loop_passed.",
+      : missingCurrentDiffCoverage.length > 0
+        ? `current diff still needs checkpoints before quality_loop_passed: ${missingCurrentDiffCoverage
+            .map((missingStage) => QUALITY_LOOP_STAGE_TOOLS[missingStage])
+            .join(", ")}`
+        : "all explicit stage tools recorded; after final audit evidence is ready, call quality_loop_passed.",
   ].join("\n");
 }
 
@@ -703,6 +728,16 @@ async function recordQualityLoopPass(
       .map((stage) => QUALITY_LOOP_STAGE_TOOLS[stage])
       .join(", ")} for the current diff before recording a pass.`;
   }
+  if (activeLoop.codexReadyForGrader) {
+    return "quality_loop_passed failed: call quality_loop_grader for the latest Codex cycle before recording a pass.";
+  }
+  const missingCurrentDiffCoverage = missingCurrentDiffCoverageStages(activeLoop, snapshot);
+  if (missingCurrentDiffCoverage.length > 0) {
+    const tools = missingCurrentDiffCoverage
+      .map((stage) => QUALITY_LOOP_STAGE_TOOLS[stage])
+      .join(", ");
+    return `quality_loop_passed failed: current diff changed since ${tools}. Call ${tools} for the current diff before recording a pass.`;
+  }
 
   const finalSelfImprovement =
     typeof input.final_self_improvement === "string"
@@ -745,14 +780,78 @@ function carriedCycleCount(activeLoop: ActiveQualityLoop | undefined, snapshot: 
   return activeLoop?.repoKey === snapshot.repoKey ? activeLoop.cycles : 0;
 }
 
-function isReviewCycleStage(stage: QualityLoopStage) {
-  return stage === "review" || stage === "codex";
+function pendingGraderBlocksRestart(
+  activeLoop: ActiveQualityLoop | undefined,
+  snapshot: RepoSnapshot,
+) {
+  return activeLoop?.repoKey === snapshot.repoKey && activeLoop.codexReadyForGrader;
+}
+
+function startsReviewCycle(activeLoop: ActiveQualityLoop, stage: QualityLoopStage) {
+  return stage === "review" || (stage === "codex" && activeLoop.reviewReadyForCodex);
+}
+
+function uniqueStages(stages: Array<QualityLoopStage>) {
+  return [...new Set(stages)];
+}
+
+function recordQualityLoopStageTransition(
+  activeLoop: ActiveQualityLoop,
+  stage: QualityLoopStage,
+  snapshot: RepoSnapshot,
+) {
+  const stageAlreadyCompleted = activeLoop.completedStages.includes(stage);
+  if (!stageAlreadyCompleted) {
+    activeLoop.completedStages.push(stage);
+  }
+  if (stage === "review") {
+    activeLoop.reviewReadyForCodex = true;
+  }
+  if (stage === "codex") {
+    activeLoop.cycles += 1;
+    activeLoop.codexFingerprints.push(snapshot.fingerprint);
+    activeLoop.reviewReadyForCodex = false;
+    activeLoop.codexReadyForGrader = true;
+  }
+  if (stage === "grade") {
+    activeLoop.graderFingerprints.push(snapshot.fingerprint);
+    activeLoop.codexReadyForGrader = false;
+  }
+  if (stage === "final_audit") {
+    activeLoop.finalAuditFingerprint = snapshot.fingerprint;
+  }
 }
 
 function activeLoopMatches(activeLoop: ActiveQualityLoop | undefined, snapshot: RepoSnapshot) {
-  return (
-    activeLoop?.repoKey === snapshot.repoKey && activeLoop.fingerprint === snapshot.fingerprint
-  );
+  return activeLoop?.repoKey === snapshot.repoKey;
+}
+
+function graderCoversCurrentDiff(
+  activeLoop: ActiveQualityLoop | undefined,
+  snapshot: RepoSnapshot,
+) {
+  return activeLoop?.graderFingerprints.includes(snapshot.fingerprint) === true;
+}
+
+function finalAuditCoversCurrentDiff(
+  activeLoop: ActiveQualityLoop | undefined,
+  snapshot: RepoSnapshot,
+) {
+  return activeLoop?.finalAuditFingerprint === snapshot.fingerprint;
+}
+
+function missingCurrentDiffCoverageStages(
+  activeLoop: ActiveQualityLoop | undefined,
+  snapshot: RepoSnapshot,
+) {
+  const missingStages: Array<QualityLoopStage> = [];
+  if (activeLoop?.codexReadyForGrader || !graderCoversCurrentDiff(activeLoop, snapshot)) {
+    missingStages.push("grade");
+  }
+  if (!finalAuditCoversCurrentDiff(activeLoop, snapshot)) {
+    missingStages.push("final_audit");
+  }
+  return missingStages;
 }
 
 function missingRequiredStages(activeLoop: ActiveQualityLoop | undefined) {
@@ -768,6 +867,34 @@ function missingPrerequisiteStages(activeLoop: ActiveQualityLoop, stage: Quality
   );
 }
 
+function missingCurrentCyclePrerequisiteStages(
+  activeLoop: ActiveQualityLoop,
+  stage: QualityLoopStage,
+  snapshot: RepoSnapshot,
+) {
+  if (stage !== "grade" && activeLoop.codexReadyForGrader) {
+    return ["grade"] satisfies Array<QualityLoopStage>;
+  }
+  if (
+    stage === "codex" &&
+    activeLoop.codexFingerprints.length > 0 &&
+    !activeLoop.reviewReadyForCodex
+  ) {
+    return ["review"] satisfies Array<QualityLoopStage>;
+  }
+  if (stage === "grade" && !activeLoop.codexReadyForGrader) {
+    return ["codex"] satisfies Array<QualityLoopStage>;
+  }
+  if (stage === "final_audit") {
+    const missingStages: Array<QualityLoopStage> = [];
+    if (!graderCoversCurrentDiff(activeLoop, snapshot)) {
+      missingStages.push("grade");
+    }
+    return missingStages;
+  }
+  return [];
+}
+
 function renderStageToolDescription(stage: QualityLoopStage) {
   switch (stage) {
     case "review":
@@ -775,7 +902,7 @@ function renderStageToolDescription(stage: QualityLoopStage) {
     case "codex":
       return "Record that the current review gate has explicitly reached the Codex review stage and return the exact instruction to run codex review --uncommitted with a long shell timeout after review-and-simplify has run.";
     case "grade":
-      return "Record that the current review gate has explicitly reached the separate-grader stage and return the exact instruction to launch a read-only grading subagent after review-and-simplify and Codex fixes.";
+      return "Record that the current review gate has explicitly reached the separate-grader stage and return the exact instruction to launch a read-only grading subagent for this review+Codex cycle.";
     case "final_audit":
       return "Record that the current review gate has explicitly reached the final improve-codebase/improve-test audit stage and return the exact instruction to run those final read-only audits before quality_loop_passed.";
   }
@@ -784,11 +911,11 @@ function renderStageToolDescription(stage: QualityLoopStage) {
 function renderStageInstruction(stage: QualityLoopStage, snapshot: RepoSnapshot) {
   switch (stage) {
     case "review":
-      return `Next: run the review-and-simplify-changes skill in this main thread against the uncommitted diff in ${snapshot.repoRoot}. Cycle 1 should review the full diff; later cycles should target newly changed/fixed code unless fixes are broad. Launch the read-only review subagents/tracks that the skill requires, apply near-mandatory findings, and skip only false-positive/out-of-scope findings with evidence. Then call quality_loop_codex_review.`;
+      return `Next: run the review-and-simplify-changes skill in this main thread against the uncommitted diff in ${snapshot.repoRoot}. Cycle 1 should review the full diff; later cycles should target newly changed/fixed code unless fixes are broad. Launch the read-only review subagents/tracks that the skill requires, apply near-mandatory findings, and skip only false-positive/out-of-scope findings with evidence. If review fixes change the diff fingerprint, do not restart the loop; continue by calling quality_loop_codex_review.`;
     case "codex":
-      return `Next: run Codex CLI from ${snapshot.repoRoot} with: codex review --uncommitted. Use a long shell timeout, e.g. timeout_ms 600000 (10 minutes), because Codex review often exceeds the default 120s. Cycle 1 should run full Codex; later cycles should rerun full Codex only when meaningful code changed since the last Codex pass. Adjudicate findings against the implementation intent, apply aligned fixes, and do not blindly accept scope-changing suggestions. Then call quality_loop_grader.`;
+      return `Next: run Codex CLI from ${snapshot.repoRoot} with: codex review --uncommitted. Use a long shell timeout, e.g. timeout_ms 600000 (10 minutes), because Codex review often exceeds the default 120s. Cycle 1 should run full Codex; later cycles should rerun full Codex only when meaningful code changed since the last Codex pass. Adjudicate findings against the implementation intent, apply aligned fixes, and do not blindly accept scope-changing suggestions. Then call quality_loop_grader for this cycle.`;
     case "grade":
-      return "Next: launch a separate read-only grading subagent. It must compare review-and-simplify/Codex feedback against the current diff and verify fixes/skips; the main agent must not self-grade. Then call quality_loop_final_audit.";
+      return "Next: launch a separate read-only grading subagent for this review+Codex cycle. It must compare review-and-simplify/Codex feedback against the current diff and verify fixes/skips; the main agent must not self-grade. If fixes change the diff, start the next review+Codex cycle and run its grader; otherwise call quality_loop_final_audit only when the final improve-codebase/improve-test audits are ready to run.";
     case "final_audit":
       return "Next: run final read-only improve-codebase-architecture and improve-test-suite passes against the uncommitted diff/thread/process. Fix only introduced or worsened blockers, keep global skill/prompting suggestions report-only, then call quality_loop_passed.";
   }
@@ -973,7 +1100,7 @@ ${renderCommitContext(command, snapshot, previousPass)}
 Run this loop in the current Amp thread, then retry the commit:
 First required action: call quality_loop_review with workdir "${snapshot.repoRoot}".
 
-Then follow the instructions returned by each review-gate stage tool. quality_loop_passed will reject until quality_loop_review, quality_loop_codex_review, quality_loop_grader, and quality_loop_final_audit have all been called for this active diff. Cycle 1 should review the full diff; later cycles should target newly changed/fixed code unless fixes are broad. Rerun full Codex only when meaningful code changed since the last Codex pass.
+Then follow the instructions returned by each review-gate stage tool. quality_loop_passed will reject until quality_loop_review, quality_loop_codex_review, quality_loop_grader, and quality_loop_final_audit have all been called for this active same-repo loop, every Codex cycle is followed by a grader, and grader/final-audit checkpoints cover the current diff fingerprint. Cycle 1 should review the full diff; later cycles should target newly changed/fixed code unless fixes are broad. Rerun full Codex only when meaningful code changed since the last Codex pass, and run the separate grader after every Codex cycle.
 
 Use quality_loop_cancel only for smoke tests or abandoned loops; it clears active TUI status without recording a pass.
 
@@ -1040,7 +1167,7 @@ function renderStatus(
       .join("\n");
   }
 
-  if (current?.kind === "active" && current.fingerprint === snapshot.fingerprint) {
+  if (current?.kind === "active" && current.repoRoot === snapshot.repoRoot) {
     return [
       "Review gate: active for current diff.",
       `Repo: ${snapshot.repoRoot}`,
@@ -1972,8 +2099,14 @@ export const __testing = {
   commitWorkdir,
   createQualityLoopStatus,
   createSnapshotFingerprint,
+  finalAuditCoversCurrentDiff,
+  graderCoversCurrentDiff,
   isGitCommitCommand,
-  isReviewCycleStage,
+  missingCurrentCyclePrerequisiteStages,
+  missingCurrentDiffCoverageStages,
   missingRequiredStages,
+  pendingGraderBlocksRestart,
+  recordQualityLoopStageTransition,
+  renderStatus,
   unsupportedRepoOverrideReason,
 };
