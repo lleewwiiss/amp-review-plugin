@@ -1,0 +1,39 @@
+{
+  "name": "amp-quality-loop-plugin",
+  "version": "0.1.0",
+  "description": "Strict pre-commit quality-loop gate plugin for Amp.",
+  "keywords": [
+    "amp",
+    "ampcode",
+    "codex",
+    "plugin",
+    "precommit",
+    "quality"
+  ],
+  "license": "MIT",
+  "files": [
+    "src/quality-loop.ts",
+    "README.md"
+  ],
+  "type": "module",
+  "scripts": {
+    "check": "bun run typecheck && bun run lint && bun run test && bun run format:check",
+    "format": "oxfmt --write .",
+    "format:check": "oxfmt --check .",
+    "install:plugin": "mkdir -p ~/.config/amp/plugins && cp src/quality-loop.ts ~/.config/amp/plugins/quality-loop.ts",
+    "lint": "oxlint .",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@ampcode/plugin": "^0.0.0-20260627023428-g3057763",
+    "@nkzw/eslint-plugin": "^2.0.0",
+    "@nkzw/oxlint-config": "^1.2.1",
+    "eslint-plugin-no-only-tests": "^3.4.0",
+    "eslint-plugin-perfectionist": "^5.9.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "oxfmt": "^0.51.0",
+    "oxlint": "^1.66.0",
+    "typescript": "^5.9.3"
+  }
+}
