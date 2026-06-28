@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { __testing } from "./quality-loop.ts";
+import { __testing } from "./review-gate.ts";
 
 describe("commit gate parsing", () => {
   test("ignores read-only commit probes but catches later mutating commits", () => {
@@ -244,7 +244,7 @@ describe("diff fingerprinting", () => {
 
   test("changes when tracked status changes", () => {
     const clean = __testing.createSnapshotFingerprint("", "", "", []);
-    const modified = __testing.createSnapshotFingerprint(" M src/quality-loop.ts\n", "", "", []);
+    const modified = __testing.createSnapshotFingerprint(" M src/review-gate.ts\n", "", "", []);
 
     expect(modified).not.toBe(clean);
   });
@@ -274,7 +274,7 @@ describe("status item best-effort handling", () => {
 
     expect(() => status.required(snapshot)).not.toThrow();
     expect(status.current()).toMatchObject({ fingerprint: "fingerprint-a", kind: "required" });
-    expect(logs.some(([message]) => message === "quality loop status item update failed")).toBe(
+    expect(logs.some(([message]) => message === "review gate status item update failed")).toBe(
       true,
     );
   });
@@ -301,8 +301,8 @@ describe("status item best-effort handling", () => {
     expect(() => status.active(snapshot)).not.toThrow();
     status.required(snapshot);
     expect(() => status.clear()).not.toThrow();
-    expect(logs.map(([message]) => message)).toContain("quality loop status item update failed");
-    expect(logs.map(([message]) => message)).toContain("quality loop status item clear failed");
+    expect(logs.map(([message]) => message)).toContain("review gate status item update failed");
+    expect(logs.map(([message]) => message)).toContain("review gate status item clear failed");
   });
 });
 

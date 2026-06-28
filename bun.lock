@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "amp-quality-loop-plugin",
+      "name": "amp-review-plugin",
       "devDependencies": {
         "@ampcode/plugin": "^0.0.0-20260627023428-g3057763",
         "@nkzw/eslint-plugin": "^2.0.0",

@@ -66,7 +66,7 @@ type QualityLoopStage = "codex" | "final_audit" | "grade" | "review";
 
 const CONFIG_KEY = "qualityLoopPlugin";
 const CONFIG_TARGET = "global";
-const STATUS_ITEM_URL = "command:quality-loop-status";
+const STATUS_ITEM_URL = "command:review-gate-status";
 const STATUS_ANIMATION_INTERVAL_MS = 160;
 const STATUS_REFRESH_INTERVAL_MS = 5000;
 const MAX_CYCLES = 3;
@@ -90,7 +90,7 @@ const QUALITY_LOOP_STAGE_TOOLS: Record<QualityLoopStage, string> = {
 };
 
 export default function qualityLoopPlugin(amp: PluginAPI) {
-  amp.logger.log("quality loop plugin initialized");
+  amp.logger.log("review gate plugin initialized");
   const status = createQualityLoopStatus(amp);
   const pendingContinuations = new Map<ThreadID, PendingQualityLoopContinuation>();
   const activeLoops = new Map<ThreadID, ActiveQualityLoop>();
@@ -165,7 +165,7 @@ export default function qualityLoopPlugin(amp: PluginAPI) {
         userMessage: renderContinuationMessage(pending.command, snapshot, pass),
       };
     } catch (error) {
-      amp.logger.log("quality loop continuation refresh failed", errorMessage(error));
+      amp.logger.log("review gate continuation refresh failed", errorMessage(error));
       pendingContinuations.delete(event.thread.id);
       return {
         action: "continue",
@@ -180,18 +180,18 @@ export default function qualityLoopPlugin(amp: PluginAPI) {
 
   amp.registerTool({
     description:
-      "Start the strict pre-commit quality loop after the plugin blocks a non-trivial git commit. This marks the current diff as active in the TUI and returns the loop instructions the main agent must follow.",
+      "Start the strict pre-commit review gate after the plugin blocks a non-trivial git commit. This marks the current diff as active in the TUI and returns the loop instructions the main agent must follow.",
     async execute(input, ctx) {
       return startQualityLoop(amp, status, pendingContinuations, activeLoops, input, ctx);
     },
     inputSchema: {
       properties: {
         blocked_command: {
-          description: "The git commit command that was blocked by the quality-loop plugin.",
+          description: "The git commit command that was blocked by the review-gate plugin.",
           type: "string",
         },
         expected_fingerprint: {
-          description: "Optional diff fingerprint from the quality-loop blocked-commit message.",
+          description: "Optional diff fingerprint from the review-gate blocked-commit message.",
           type: "string",
         },
         workdir: {
@@ -229,12 +229,12 @@ export default function qualityLoopPlugin(amp: PluginAPI) {
 
   amp.registerTool({
     description:
-      "Cancel the active quality loop in this thread without recording a pass. Use for smoke tests, abandoned loops, or when the active TUI status should be cleared.",
+      "Cancel the active review gate in this thread without recording a pass. Use for smoke tests, abandoned loops, or when the active TUI status should be cleared.",
     async execute(_input, ctx) {
       pendingContinuations.delete(ctx.thread.id);
       activeLoops.delete(ctx.thread.id);
       status.clear();
-      return "quality_loop_cancel recorded. Active quality-loop status cleared for this thread; no pass was recorded.";
+      return "quality_loop_cancel recorded. Active review-gate status cleared for this thread; no pass was recorded.";
     },
     inputSchema: {
       properties: {},
@@ -245,14 +245,14 @@ export default function qualityLoopPlugin(amp: PluginAPI) {
 
   amp.registerTool({
     description:
-      "Record that the strict pre-commit quality loop passed for the current uncommitted diff. Call only after quality_loop_review, quality_loop_codex_review, quality_loop_grader, and quality_loop_final_audit were called for the active current diff, review-and-simplify ran from the main thread with its required read-only review subagents/tracks, Codex CLI review findings were adjudicated and fixed when aligned with implementation intent, a separate read-only grading subagent verified fixes against feedback, and final improve-codebase/test audits ran.",
+      "Record that the strict pre-commit review gate passed for the current uncommitted diff. Call only after quality_loop_review, quality_loop_codex_review, quality_loop_grader, and quality_loop_final_audit were called for the active current diff, review-and-simplify ran from the main thread with its required read-only review subagents/tracks, Codex CLI review findings were adjudicated and fixed when aligned with implementation intent, a separate read-only grading subagent verified fixes against feedback, and final improve-codebase/test audits ran.",
     async execute(input, ctx) {
       return recordQualityLoopPass(amp, status, activeLoops, input, ctx);
     },
     inputSchema: {
       properties: {
         cycles: {
-          description: `Number of full quality-loop cycles completed. Maximum intended loop cap is ${MAX_CYCLES}.`,
+          description: `Number of full review+Codex cycles completed. Maximum intended loop cap is ${MAX_CYCLES}.`,
           maximum: MAX_CYCLES,
           minimum: 1,
           type: "integer",
@@ -285,11 +285,11 @@ export default function qualityLoopPlugin(amp: PluginAPI) {
   });
 
   amp.registerCommand(
-    "quality-loop-status",
+    "review-gate-status",
     {
-      category: "quality-loop",
-      description: "Show whether the current repository diff has a recorded quality-loop pass.",
-      title: "Show quality-loop status",
+      category: "review-gate",
+      description: "Show whether the current repository diff has a recorded review-gate pass.",
+      title: "Show review-gate status",
     },
     async (ctx) => {
       const workdir = ".";
@@ -297,7 +297,7 @@ export default function qualityLoopPlugin(amp: PluginAPI) {
       try {
         snapshot = await getRepoSnapshot(amp, workdir, ctx.$);
       } catch (error) {
-        await ctx.ui.notify(`Quality loop: could not inspect ${workdir}: ${errorMessage(error)}`);
+        await ctx.ui.notify(`Review gate: could not inspect ${workdir}: ${errorMessage(error)}`);
         return;
       }
       if (!snapshot) {
@@ -339,7 +339,7 @@ function createQualityLoopStatus(amp: PluginAPI): QualityLoopStatusController {
       }
       item.update(value);
     } catch (error) {
-      amp.logger.log("quality loop status item update failed", errorMessage(error));
+      amp.logger.log("review gate status item update failed", errorMessage(error));
       item = undefined;
     }
   };
@@ -351,7 +351,7 @@ function createQualityLoopStatus(amp: PluginAPI): QualityLoopStatusController {
     try {
       staleItem?.unsubscribe();
     } catch (error) {
-      amp.logger.log("quality loop status item clear failed", errorMessage(error));
+      amp.logger.log("review gate status item clear failed", errorMessage(error));
     }
   };
 
@@ -386,7 +386,7 @@ function createQualityLoopStatus(amp: PluginAPI): QualityLoopStatusController {
         refresh();
       }
     } catch (error) {
-      amp.logger.log("quality loop status refresh failed", errorMessage(error));
+      amp.logger.log("review gate status refresh failed", errorMessage(error));
     } finally {
       refreshInFlight = false;
     }
@@ -453,15 +453,15 @@ function passedState(pass: QualityLoopPass): QualityLoopStatusState {
 
 function renderStatusItem(state: QualityLoopStatusState): StatusItemValue {
   if (state.kind === "active") {
-    return { text: `${activeStatusFrame()} Quality loop active`, url: STATUS_ITEM_URL };
+    return { text: `${activeStatusFrame()} Review gate active`, url: STATUS_ITEM_URL };
   }
 
   if (state.kind === "passed") {
-    return { text: "Quality loop passed", url: STATUS_ITEM_URL };
+    return { text: "Review gate passed", url: STATUS_ITEM_URL };
   }
 
   return {
-    text: "Quality loop required",
+    text: "Review gate required",
     url: STATUS_ITEM_URL,
   };
 }
@@ -473,12 +473,12 @@ function renderCurrentStatus(state: QualityLoopStatusState | undefined) {
 
   const age = formatDuration(Date.now() - state.since);
   if (state.kind === "active") {
-    return `Quality loop: active.\nRepo: ${state.repoRoot}\nFingerprint: ${state.fingerprint}\nStarted: ${age} ago.`;
+    return `Review gate: active.\nRepo: ${state.repoRoot}\nFingerprint: ${state.fingerprint}\nStarted: ${age} ago.`;
   }
 
   return state.kind === "passed"
-    ? `Quality loop: pass recorded.\nRepo: ${state.repoRoot}\nFingerprint: ${state.fingerprint}\nRecorded: ${age} ago.`
-    : `Quality loop: required.\nRepo: ${state.repoRoot}\nFingerprint: ${state.fingerprint}\nStarted: ${age} ago.`;
+    ? `Review gate: pass recorded.\nRepo: ${state.repoRoot}\nFingerprint: ${state.fingerprint}\nRecorded: ${age} ago.`
+    : `Review gate: required.\nRepo: ${state.repoRoot}\nFingerprint: ${state.fingerprint}\nStarted: ${age} ago.`;
 }
 
 async function gateGitCommit(
@@ -511,7 +511,7 @@ async function gateGitCommit(
 
     const trivial = await isConfidentlyTrivial(amp, snapshot);
     if (trivial) {
-      amp.logger.log("quality loop skipped for trivial diff", snapshot.repoRoot);
+      amp.logger.log("review gate skipped for trivial diff", snapshot.repoRoot);
       return { action: "allow" };
     }
 
@@ -525,7 +525,7 @@ async function gateGitCommit(
       message: renderGateMessage(command, snapshot, pass),
     };
   } catch (error) {
-    amp.logger.log("quality loop commit gate failed closed", errorMessage(error));
+    amp.logger.log("review gate commit gate failed closed", errorMessage(error));
     return {
       action: "reject-and-continue",
       message: renderInspectionFailedMessage(command, workdir, errorMessage(error)),
@@ -771,13 +771,13 @@ function missingPrerequisiteStages(activeLoop: ActiveQualityLoop, stage: Quality
 function renderStageToolDescription(stage: QualityLoopStage) {
   switch (stage) {
     case "review":
-      return "Record that the current quality loop has explicitly reached the review-and-simplify stage and return the exact instruction to run review-and-simplify-changes against the uncommitted diff.";
+      return "Record that the current review gate has explicitly reached the review-and-simplify stage and return the exact instruction to run review-and-simplify-changes against the uncommitted diff.";
     case "codex":
-      return "Record that the current quality loop has explicitly reached the Codex review stage and return the exact instruction to run codex review --uncommitted with a long shell timeout after review-and-simplify has run.";
+      return "Record that the current review gate has explicitly reached the Codex review stage and return the exact instruction to run codex review --uncommitted with a long shell timeout after review-and-simplify has run.";
     case "grade":
-      return "Record that the current quality loop has explicitly reached the separate-grader stage and return the exact instruction to launch a read-only grading subagent after review-and-simplify and Codex fixes.";
+      return "Record that the current review gate has explicitly reached the separate-grader stage and return the exact instruction to launch a read-only grading subagent after review-and-simplify and Codex fixes.";
     case "final_audit":
-      return "Record that the current quality loop has explicitly reached the final improve-codebase/improve-test audit stage and return the exact instruction to run those final read-only audits before quality_loop_passed.";
+      return "Record that the current review gate has explicitly reached the final improve-codebase/improve-test audit stage and return the exact instruction to run those final read-only audits before quality_loop_passed.";
   }
 }
 
@@ -803,7 +803,7 @@ async function getRepoSnapshot(
   try {
     repoRoot = (await shell`git -C ${workdir} rev-parse --show-toplevel`).stdout.trim();
   } catch (error) {
-    amp.logger.log("quality loop repo detection failed", errorMessage(error));
+    amp.logger.log("review gate repo detection failed", errorMessage(error));
     return undefined;
   }
 
@@ -878,7 +878,7 @@ async function getUntrackedSymlinkTarget(shell: ShellFunction, repoRoot: string,
 async function isConfidentlyTrivial(amp: PluginAPI, snapshot: RepoSnapshot) {
   try {
     const answer = await amp.ai
-      .ask(`Is this uncommitted git diff trivial enough to skip the strict quality loop before commit?
+      .ask(`Is this uncommitted git diff trivial enough to skip the strict review gate before commit?
 
 Answer yes only for clearly low-risk changes such as README/docs prose, comments-only edits, or tiny non-behavioral metadata/text tweaks. Answer no for source code, tests, build/config, dependency/lockfile changes, generated public contracts, behavior changes, or anything uncertain.
 
@@ -889,7 +889,7 @@ Diff excerpt:\n${snapshot.diffExcerpt || "(no tracked diff; possibly untracked f
 
     return answer.result === "yes" && answer.probability >= TRIVIAL_SKIP_CONFIDENCE;
   } catch (error) {
-    amp.logger.log("quality loop trivial classifier failed", errorMessage(error));
+    amp.logger.log("review gate trivial classifier failed", errorMessage(error));
     return false;
   }
 }
@@ -923,7 +923,7 @@ function renderGateMessage(
   snapshot: RepoSnapshot,
   previousPass: QualityLoopPass | undefined,
 ) {
-  return `Quality loop required before git commit.
+  return `Review gate required before git commit.
 
 ${renderCommitContext(command, snapshot, previousPass)}
 
@@ -944,7 +944,7 @@ ${renderPreviousPass(previousPass)}`;
 }
 
 function renderInspectionFailedMessage(command: string, workdir: string, reason?: string) {
-  return `Quality loop blocked git commit because it could not inspect the target repository.
+  return `Review gate blocked git commit because it could not inspect the target repository.
 
 Blocked command: ${command}
 Resolved workdir: ${workdir}
@@ -953,7 +953,7 @@ Use an explicit, literal repository path without shell variables or unsupported 
 }
 
 function renderUnsupportedRepoOverrideMessage(command: string, reason: string) {
-  return `Quality loop blocked git commit because it uses unsupported repository override syntax.
+  return `Review gate blocked git commit because it uses unsupported repository override syntax.
 
 Blocked command: ${command}
 Reason: ${reason}
@@ -966,14 +966,14 @@ function renderLoopInstructions(
   snapshot: RepoSnapshot,
   previousPass: QualityLoopPass | undefined,
 ) {
-  return `Quality loop active for blocked git commit.
+  return `Review gate active for blocked git commit.
 
 ${renderCommitContext(command, snapshot, previousPass)}
 
 Run this loop in the current Amp thread, then retry the commit:
 First required action: call quality_loop_review with workdir "${snapshot.repoRoot}".
 
-Then follow the instructions returned by each quality-loop stage tool. quality_loop_passed will reject until quality_loop_review, quality_loop_codex_review, quality_loop_grader, and quality_loop_final_audit have all been called for this active diff. Cycle 1 should review the full diff; later cycles should target newly changed/fixed code unless fixes are broad. Rerun full Codex only when meaningful code changed since the last Codex pass.
+Then follow the instructions returned by each review-gate stage tool. quality_loop_passed will reject until quality_loop_review, quality_loop_codex_review, quality_loop_grader, and quality_loop_final_audit have all been called for this active diff. Cycle 1 should review the full diff; later cycles should target newly changed/fixed code unless fixes are broad. Rerun full Codex only when meaningful code changed since the last Codex pass.
 
 Use quality_loop_cancel only for smoke tests or abandoned loops; it clears active TUI status without recording a pass.
 
@@ -995,11 +995,11 @@ function renderContinuationMessage(
   snapshot: RepoSnapshot,
   previousPass: QualityLoopPass | undefined,
 ) {
-  return `The quality-loop plugin blocked the previous commit. First required actions: call quality_loop_start with workdir "${snapshot.repoRoot}", blocked_command ${JSON.stringify(command)}, and expected_fingerprint "${snapshot.fingerprint}"; then call quality_loop_review with workdir "${snapshot.repoRoot}" and run the returned review-and-simplify instruction. Do not retry the commit or merely report status before those tool calls. ${renderPreviousPass(previousPass)}`;
+  return `The review-gate plugin blocked the previous commit. First required actions: call quality_loop_start with workdir "${snapshot.repoRoot}", blocked_command ${JSON.stringify(command)}, and expected_fingerprint "${snapshot.fingerprint}"; then call quality_loop_review with workdir "${snapshot.repoRoot}" and run the returned review-and-simplify instruction. Do not retry the commit or merely report status before those tool calls. ${renderPreviousPass(previousPass)}`;
 }
 
 function renderContinuationRefreshFailedMessage(command: string, repoRoot: string, reason: string) {
-  return `The quality-loop plugin blocked the previous commit, but could not refresh the current diff before auto-starting the loop.
+  return `The review-gate plugin blocked the previous commit, but could not refresh the current diff before auto-starting the loop.
 
 Blocked command: ${command}
 Repo: ${repoRoot}
@@ -1020,11 +1020,11 @@ function renderStatus(
   current?: QualityLoopStatusState,
 ) {
   if (!snapshot.hasChanges) {
-    return `Quality loop: no uncommitted changes in ${snapshot.repoRoot}.`;
+    return `Review gate: no uncommitted changes in ${snapshot.repoRoot}.`;
   }
   if (pass?.fingerprint === snapshot.fingerprint) {
     return [
-      "Quality loop: pass recorded for current diff.",
+      "Review gate: pass recorded for current diff.",
       `Repo: ${snapshot.repoRoot}`,
       `Recorded: ${new Date(pass.recordedAt).toISOString()}`,
       pass.cycles ? `Cycles: ${pass.cycles}` : undefined,
@@ -1042,7 +1042,7 @@ function renderStatus(
 
   if (current?.kind === "active" && current.fingerprint === snapshot.fingerprint) {
     return [
-      "Quality loop: active for current diff.",
+      "Review gate: active for current diff.",
       `Repo: ${snapshot.repoRoot}`,
       `Started: ${new Date(current.since).toISOString()}`,
       `Fingerprint: ${snapshot.fingerprint}`,
@@ -1050,7 +1050,7 @@ function renderStatus(
   }
 
   return [
-    "Quality loop: pass required before git commit.",
+    "Review gate: pass required before git commit.",
     `Repo: ${snapshot.repoRoot}`,
     pass
       ? "Recorded pass exists, but diff changed since it was recorded."

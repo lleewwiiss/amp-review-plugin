@@ -1,18 +1,19 @@
 {
-  "name": "amp-quality-loop-plugin",
+  "name": "amp-review-plugin",
   "version": "0.1.0",
-  "description": "Strict pre-commit quality-loop gate plugin for Amp.",
+  "description": "Strict pre-commit review gate plugin for Amp.",
   "keywords": [
     "amp",
     "ampcode",
     "codex",
+    "gate",
     "plugin",
     "precommit",
-    "quality"
+    "review"
   ],
   "license": "MIT",
   "files": [
-    "src/quality-loop.ts",
+    "src/review-gate.ts",
     "README.md"
   ],
   "type": "module",
@@ -20,7 +21,7 @@
     "check": "bun run typecheck && bun run lint && bun run test && bun run format:check",
     "format": "oxfmt --write .",
     "format:check": "oxfmt --check .",
-    "install:plugin": "mkdir -p ~/.config/amp/plugins && cp src/quality-loop.ts ~/.config/amp/plugins/quality-loop.ts",
+    "install:plugin": "mkdir -p ~/.config/amp/plugins && cp src/review-gate.ts ~/.config/amp/plugins/review-gate.ts && rm -f ~/.config/amp/plugins/quality-loop.ts",
     "lint": "oxlint .",
     "test": "bun test",
     "typecheck": "tsc --noEmit"

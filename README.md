@@ -1,31 +1,45 @@
-# amp-quality-loop-plugin
+# amp-review-plugin
 
-Strict pre-commit quality-loop gate for [Amp](https://ampcode.com).
+Strict pre-commit review gate for [Amp](https://ampcode.com).
 
-When an Amp agent tries a non-trivial mutating `git commit`, this plugin blocks the commit, marks the loop active in the TUI, and forces explicit quality-loop stage tools before a pass can be recorded.
+When an Amp agent tries a non-trivial mutating `git commit`, this plugin blocks the commit, marks the review gate active in the TUI, and forces explicit review-gate stage tools before a pass can be recorded.
+
+Repo/package name: `amp-review-plugin`. Source and installed plugin file: `review-gate.ts`. Tool names stay `quality_loop_*` for compatibility with existing review workflows.
 
 ## Prerequisites
 
 - Amp with plugin support.
-- Bun.
 - Codex CLI on `PATH` for `codex review --uncommitted`.
 - Required workflow skills installed from <https://github.com/lleewwiiss/codex-agents/tree/main/skills>, especially:
   - `review-and-simplify-changes`
   - `improve-codebase-architecture`
   - `improve-test-suite`
 
-## Install with an Amp agent
+## Install
 
-Copy this repo URL into Amp and ask:
+Amp loads user plugins from `~/.config/amp/plugins/*.ts`. Install this plugin by copying the plugin file there:
 
-```text
-Install this Amp quality-loop plugin from this repository URL.
-Clone it if needed, run bun install, run bun run check, run bun run install:plugin,
-then tell me to reload Amp plugins and verify amp plugins list shows quality-loop tools.
-Do not stage, commit, or push anything.
+```bash
+mkdir -p ~/.config/amp/plugins
+curl -fsSL https://raw.githubusercontent.com/lleewwiiss/amp-review-plugin/main/src/review-gate.ts \
+  -o ~/.config/amp/plugins/review-gate.ts &&
+rm -f ~/.config/amp/plugins/quality-loop.ts
 ```
 
-Manual install:
+Then reload Amp plugins with `plugins: reload` from the command palette, or restart Amp.
+
+If you want an Amp agent to install it, ask for exactly that file-copy install:
+
+```text
+Install https://github.com/lleewwiiss/amp-review-plugin as an Amp plugin.
+Download src/review-gate.ts from main into ~/.config/amp/plugins/review-gate.ts,
+creating ~/.config/amp/plugins if needed. Remove any old
+~/.config/amp/plugins/quality-loop.ts copy to avoid duplicate plugins. Do not
+clone the repository unless you need to edit it. After copying, tell me to reload
+Amp plugins or restart Amp.
+```
+
+For local development from a clone:
 
 ```bash
 bun install
@@ -33,11 +47,7 @@ bun run check
 bun run install:plugin
 ```
 
-Then reload Amp plugins with `plugins: reload` and verify:
-
-```bash
-amp plugins list
-```
+Then reload Amp plugins with `plugins: reload` from the command palette, or restart Amp.
 
 ## Tools
 
@@ -48,7 +58,7 @@ amp plugins list
 - `quality_loop_final_audit`: explicit checkpoint before final improve-codebase/improve-test read-only audits.
 - `quality_loop_passed`: record a pass only after all stage tools were called for the active current diff.
 - `quality_loop_cancel`: clear active TUI state without recording a pass.
-- `quality-loop-status`: show current pass/active/required state.
+- `review-gate-status`: show current pass/active/required state.
 
 ## Required loop
 
@@ -60,9 +70,11 @@ amp plugins list
 6. Call `quality_loop_final_audit`, then run final read-only `improve-codebase-architecture` and `improve-test-suite` audits. Skill/prompting improvements are report-only.
 7. Call `quality_loop_passed`, then retry the commit.
 
-The TUI shows `Quality loop required`, animated `Quality loop active`, or `Quality loop passed` when the Amp client exposes the experimental status item API. Tools and commands still work without it.
+The TUI shows `Review gate required`, animated `Review gate active`, or `Review gate passed` when the Amp client exposes the experimental status item API. Tools and commands still work without it.
 
 ## Development
+
+Development from a clone requires Bun.
 
 ```bash
 bun run check
